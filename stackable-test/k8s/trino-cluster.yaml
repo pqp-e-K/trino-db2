@@ -1,0 +1,66 @@
+# TrinoCluster for the Stackable operator with the db2 connector mounted via
+# podOverrides (initContainer downloads and unpacks the plugin zip).
+#
+# This is the quick-test variant. For production, prefer a custom image:
+#
+#   FROM oci.stackable.tech/sdp/trino:477-stackable25.11.0
+#   COPY --chown=stackable:stackable target/trino-db2-477 /stackable/trino-server/plugin/db2
+#
+# and reference it here instead of the podOverrides:
+#
+#   spec:
+#     image:
+#       custom: registry.example.com/trino-db2:477-stackable25.11.0-1
+#       productVersion: "477"
+---
+apiVersion: trino.stackable.tech/v1alpha1
+kind: TrinoCluster
+metadata:
+  name: trino
+spec:
+  image:
+    productVersion: "477"
+  clusterConfig:
+    listenerClass: cluster-internal
+    catalogLabelSelector:
+      matchLabels:
+        trino: trino
+  coordinators:
+    podOverrides: &db2-plugin-override
+      spec:
+        initContainers:
+          - name: fetch-db2-connector
+            # any small image with curl and unzip works
+            image: oci.stackable.tech/sdp/tools:1.0.0-stackable25.11.0
+            command:
+              - sh
+              - -c
+              - |
+                set -e
+                curl -fsSL "${PLUGIN_URL}" -o /tmp/plugin.zip
+                unzip -q /tmp/plugin.zip -d /tmp
+                cp -r /tmp/trino-db2-477/* /plugin-db2/
+            env:
+              - name: PLUGIN_URL
+                # host the zip in your artifact repository (Nexus/Artifactory) or a GitHub release
+                value: https://artifacts.example.com/trino-db2/trino-db2-477.zip
+            volumeMounts:
+              - name: db2-plugin
+                mountPath: /plugin-db2
+        containers:
+          - name: trino
+            volumeMounts:
+              - name: db2-plugin
+                mountPath: /stackable/trino-server/plugin/db2
+        volumes:
+          - name: db2-plugin
+            emptyDir: {}
+    roleGroups:
+      default:
+        replicas: 1
+  workers:
+    # the plugin must be present on every node that executes splits
+    podOverrides: *db2-plugin-override
+    roleGroups:
+      default:
+        replicas: 2

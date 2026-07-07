@@ -1,0 +1,35 @@
+# Db2 catalog as a Stackable TrinoCatalog resource, using the generic connector.
+# The label must match spec.clusterConfig.catalogLabelSelector of the TrinoCluster.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db2-credentials
+stringData:
+  user: db2inst1
+  password: change-me
+---
+apiVersion: trino.stackable.tech/v1alpha1
+kind: TrinoCatalog
+metadata:
+  name: db2
+  labels:
+    trino: trino
+spec:
+  connector:
+    generic:
+      connectorName: db2
+      properties:
+        connection-url:
+          value: jdbc:db2://db2-host.example.com:50000/DBNAME
+        connection-user:
+          valueFromSecret:
+            name: db2-credentials
+            key: user
+        connection-password:
+          valueFromSecret:
+            name: db2-credentials
+            key: password
+        # optional connector settings, same names as in a db2.properties file:
+        # db2.varchar-max-length:
+        #   value: "32672"

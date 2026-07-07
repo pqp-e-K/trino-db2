@@ -1,0 +1,33 @@
+# Local end-to-end test: Stackable Trino image (as used at the customer) + Db2,
+# with the locally built db2 connector mounted into the plugin directory.
+#
+#   mvn clean install -DskipTests          # build target/trino-db2-<version>/
+#   cd stackable-test && docker compose up -d
+#   ./run-smoke-test.sh
+services:
+  db2:
+    image: icr.io/db2_community/db2:11.5.9.0
+    platform: linux/amd64
+    privileged: true
+    environment:
+      LICENSE: accept
+      DB2INSTANCE: db2inst1
+      DB2INST1_PASSWORD: trino123
+      DBNAME: testdb
+    healthcheck:
+      test: ["CMD-SHELL", "su - db2inst1 -c 'db2 connect to testdb && db2 terminate'"]
+      interval: 15s
+      timeout: 60s
+      retries: 60
+      start_period: 120s
+
+  trino:
+    image: oci.stackable.tech/sdp/trino:477-stackable25.11.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../target/trino-db2-477:/stackable/trino-server/plugin/db2:ro
+      - ./conf:/stackable/conf:ro
+    depends_on:
+      db2:
+        condition: service_healthy
