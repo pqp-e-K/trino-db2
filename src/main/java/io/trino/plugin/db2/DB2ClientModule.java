@@ -14,18 +14,18 @@
 package io.trino.plugin.db2;
 
 import com.google.inject.Binder;
-import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import com.ibm.db2.jcc.DB2Driver;
+import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.opentelemetry.api.OpenTelemetry;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DecimalModule;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.ForBaseJdbc;
 import io.trino.plugin.jdbc.JdbcClient;
-import io.trino.plugin.jdbc.TypeHandlingJdbcConfig;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 
 import java.util.Properties;
@@ -33,22 +33,24 @@ import java.util.Properties;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 
 public class DB2ClientModule
-        implements Module
+        extends AbstractConfigurationAwareModule
 {
     @Override
-    public void configure(Binder binder)
+    protected void setup(Binder binder)
     {
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(DB2Client.class).in(Scopes.SINGLETON);
-        configBinder(binder).bindConfig(BaseJdbcConfig.class);
         configBinder(binder).bindConfig(DB2Config.class);
-        configBinder(binder).bindConfig(TypeHandlingJdbcConfig.class);
-        binder.install(new DecimalModule());
+        install(new DecimalModule());
     }
 
     @Provides
     @Singleton
     @ForBaseJdbc
-    public static ConnectionFactory getConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, DB2Config db2Config)
+    public static ConnectionFactory getConnectionFactory(
+            BaseJdbcConfig config,
+            DB2Config db2Config,
+            CredentialProvider credentialProvider,
+            OpenTelemetry openTelemetry)
     {
         Properties connectionProperties = new Properties();
         // https://www-01.ibm.com/support/knowledgecenter/ssw_ibm_i_72/rzaha/conprop.htm
@@ -62,6 +64,9 @@ public class DB2ClientModule
             connectionProperties.setProperty("pluginName", "IBMIAMauth");
         }
 
-        return new DriverConnectionFactory(new DB2Driver(), config.getConnectionUrl(), connectionProperties, credentialProvider);
+        return DriverConnectionFactory.builder(new DB2Driver(), config.getConnectionUrl(), credentialProvider)
+                .setConnectionProperties(connectionProperties)
+                .setOpenTelemetry(openTelemetry)
+                .build();
     }
 }

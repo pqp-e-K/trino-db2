@@ -17,10 +17,10 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.spi.Plugin;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDB2Plugin
 {
@@ -29,7 +29,7 @@ public class TestDB2Plugin
     {
         Plugin plugin = new DB2Plugin();
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        assertEquals(factory.getName(), "db2");
-        factory.create("test", ImmutableMap.of("connection-url", "jdbc:db2:test"), new TestingConnectorContext());
+        assertThat(factory.getName()).isEqualTo("db2");
+        factory.create("test", ImmutableMap.of("connection-url", "jdbc:db2:test"), new TestingConnectorContext()).shutdown();
     }
 }

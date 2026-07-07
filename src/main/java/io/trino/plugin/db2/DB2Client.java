@@ -13,40 +13,33 @@
  */
 package io.trino.plugin.db2;
 
+import com.google.inject.Inject;
+import io.trino.plugin.base.mapping.IdentifierMapping;
 import io.trino.plugin.jdbc.BaseJdbcClient;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcSplit;
+import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
-import io.trino.plugin.jdbc.LongReadFunction;
-import io.trino.plugin.jdbc.ObjectReadFunction;
-import io.trino.plugin.jdbc.ObjectWriteFunction;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.WriteMapping;
-import io.trino.plugin.jdbc.mapping.IdentifierMapping;
+import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
-import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
-
-import javax.inject.Inject;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.List;
 import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
@@ -61,22 +54,20 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.defaultCharColumnMappi
 import static io.trino.plugin.jdbc.StandardColumnMappings.defaultVarcharColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.fromLongTrinoTimestamp;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.longTimestampWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.timeColumnMappingUsingSqlTime;
+import static io.trino.plugin.jdbc.StandardColumnMappings.timestampColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.timestampWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.timestampWriteFunctionUsingSqlTimestamp;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.toLongTrinoTimestamp;
-import static io.trino.plugin.jdbc.StandardColumnMappings.toTrinoTimestamp;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharColumnMapping;
@@ -97,8 +88,8 @@ import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static java.lang.Math.max;
+import static java.lang.Math.min;
 import static java.lang.String.format;
-import static java.util.Locale.ENGLISH;
 import static java.util.stream.Collectors.joining;
 
 public class DB2Client
@@ -116,11 +107,10 @@ public class DB2Client
             DB2Config db2config,
             ConnectionFactory connectionFactory,
             QueryBuilder queryBuilder,
-            TypeManager typeManager,
-            IdentifierMapping identifierMapping)
-            throws SQLException
+            IdentifierMapping identifierMapping,
+            RemoteQueryModifier queryModifier)
     {
-        super(config, "\"", connectionFactory, queryBuilder, identifierMapping);
+        super("\"", connectionFactory, queryBuilder, config.getJdbcTypesMappedToVarchar(), identifierMapping, queryModifier, true);
         this.varcharMaxLength = db2config.getVarcharMaxLength();
 
         // http://stackoverflow.com/questions/16910791/getting-error-code-4220-with-null-sql-state
@@ -128,10 +118,10 @@ public class DB2Client
     }
 
     @Override
-    public Connection getConnection(ConnectorSession session, JdbcSplit split)
+    public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
             throws SQLException
     {
-        Connection connection = super.getConnection(session, split);
+        Connection connection = super.getConnection(session, split, tableHandle);
         try {
             // TRANSACTION_READ_UNCOMMITTED = Uncommitted read
             // http://www.ibm.com/developerworks/data/library/techarticle/dm-0509schuetz/
@@ -152,7 +142,7 @@ public class DB2Client
             return mapping;
         }
 
-        switch (typeHandle.getJdbcType()) {
+        switch (typeHandle.jdbcType()) {
             case Types.BIT:
             case Types.BOOLEAN:
                 return Optional.of(booleanColumnMapping());
@@ -178,8 +168,8 @@ public class DB2Client
 
             case Types.NUMERIC:
             case Types.DECIMAL:
-                int decimalDigits = typeHandle.getRequiredDecimalDigits();
-                int precision = typeHandle.getRequiredColumnSize() + max(-decimalDigits, 0); // Map decimal(p, -s) (negative scale) to decimal(p+s, 0).
+                int decimalDigits = typeHandle.requiredDecimalDigits();
+                int precision = typeHandle.requiredColumnSize() + max(-decimalDigits, 0); // Map decimal(p, -s) (negative scale) to decimal(p+s, 0).
                 if (precision > Decimals.MAX_PRECISION) {
                     break;
                 }
@@ -187,10 +177,10 @@ public class DB2Client
 
             case Types.CHAR:
             case Types.NCHAR:
-                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), false));
+                return Optional.of(defaultCharColumnMapping(typeHandle.requiredColumnSize(), false));
 
             case Types.VARCHAR:
-                int columnSize = typeHandle.getRequiredColumnSize();
+                int columnSize = typeHandle.requiredColumnSize();
                 if (columnSize == -1) {
                     return Optional.of(varcharColumnMapping(createUnboundedVarcharType(), true));
                 }
@@ -199,7 +189,7 @@ public class DB2Client
             case Types.NVARCHAR:
             case Types.LONGVARCHAR:
             case Types.LONGNVARCHAR:
-                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), false));
+                return Optional.of(defaultVarcharColumnMapping(typeHandle.requiredColumnSize(), false));
 
             case Types.BINARY:
             case Types.VARBINARY:
@@ -214,7 +204,7 @@ public class DB2Client
                 return Optional.of(timeColumnMappingUsingSqlTime());
 
             case Types.TIMESTAMP:
-                TimestampType timestampType = typeHandle.getDecimalDigits()
+                TimestampType timestampType = typeHandle.decimalDigits()
                         .map(TimestampType::createTimestampType)
                         .orElse(TIMESTAMP_MILLIS);
                 return Optional.of(timestampColumnMapping(timestampType));
@@ -226,65 +216,13 @@ public class DB2Client
         return Optional.empty();
     }
 
-    public static ColumnMapping timestampColumnMapping(TimestampType timestampType)
-    {
-        if (timestampType.getPrecision() <= TimestampType.MAX_SHORT_PRECISION) {
-            return ColumnMapping.longMapping(
-                    timestampType,
-                    timestampReadFunction(timestampType),
-                    timestampWriteFunctionUsingSqlTimestamp(timestampType));
-        }
-        checkArgument(timestampType.getPrecision() <= MAX_LOCAL_DATE_TIME_PRECISION, "Precision is out of range: %s", timestampType.getPrecision());
-        return ColumnMapping.objectMapping(
-                timestampType,
-                longtimestampReadFunction(timestampType),
-                longTimestampWriteFunction(timestampType));
-    }
-
-    public static LongReadFunction timestampReadFunction(TimestampType timestampType)
-    {
-        checkArgument(timestampType.getPrecision() <= TimestampType.MAX_SHORT_PRECISION, "Precision is out of range: %s", timestampType.getPrecision());
-        return (resultSet, columnIndex) -> toTrinoTimestamp(timestampType, resultSet.getTimestamp(columnIndex).toLocalDateTime());
-    }
-
-    /**
-     * Customized timestampReadFunction to convert timestamp type to LocalDateTime type.
-     * Notice that it's because Db2 JDBC driver doesn't support {@link ResetSet#getObject(index, Class<T>)}.
-     *
-     * @param timestampType
-     * @return
-     */
-    private static ObjectReadFunction longtimestampReadFunction(TimestampType timestampType)
-    {
-        checkArgument(timestampType.getPrecision() <= MAX_LOCAL_DATE_TIME_PRECISION,
-                "Precision is out of range: %s", timestampType.getPrecision());
-        return ObjectReadFunction.of(
-                LongTimestamp.class,
-                (resultSet, columnIndex) -> toLongTrinoTimestamp(timestampType, resultSet.getTimestamp(columnIndex).toLocalDateTime()));
-    }
-
-    /**
-     * Customized timestampWriteFunction.
-     * Notice that it's because Db2 JDBC driver doesn't support {@link PreparedStatement#setObject(index, LocalDateTime)}.
-     * @param timestampType
-     * @return
-     */
-    private static ObjectWriteFunction longTimestampWriteFunction(TimestampType timestampType)
-    {
-        checkArgument(timestampType.getPrecision() > TimestampType.MAX_SHORT_PRECISION, "Precision is out of range: %s", timestampType.getPrecision());
-        return ObjectWriteFunction.of(
-                LongTimestamp.class,
-                (statement, index, value) -> statement.setTimestamp(index, Timestamp.valueOf(fromLongTrinoTimestamp(value, timestampType.getPrecision()))));
-    }
-
     /**
      * To map data types when generating SQL.
      */
     @Override
     public WriteMapping toWriteMapping(ConnectorSession session, Type type)
     {
-        if (type instanceof VarcharType) {
-            VarcharType varcharType = (VarcharType) type;
+        if (type instanceof VarcharType varcharType) {
             String dataType;
 
             if (varcharType.isUnbounded()) {
@@ -303,19 +241,22 @@ public class DB2Client
             return WriteMapping.sliceMapping(dataType, varcharWriteFunction());
         }
 
-        if (type instanceof TimestampType) {
-            TimestampType timestampType = (TimestampType) type;
+        if (type instanceof TimestampType timestampType) {
             verify(timestampType.getPrecision() <= DB2_MAX_SUPPORTED_TIMESTAMP_PRECISION);
-            return WriteMapping.longMapping(format("TIMESTAMP(%s)", timestampType.getPrecision()), timestampWriteFunction(timestampType));
+            String dataType = format("TIMESTAMP(%s)", timestampType.getPrecision());
+            if (timestampType.getPrecision() <= TimestampType.MAX_SHORT_PRECISION) {
+                return WriteMapping.longMapping(dataType, timestampWriteFunction(timestampType));
+            }
+            // values are rounded to nanoseconds, the maximum precision of LocalDateTime
+            return WriteMapping.objectMapping(dataType, longTimestampWriteFunction(timestampType, min(timestampType.getPrecision(), MAX_LOCAL_DATE_TIME_PRECISION)));
         }
 
-        return this.legacyToWriteMapping(session, type);
+        return this.legacyToWriteMapping(type);
     }
 
-    protected WriteMapping legacyToWriteMapping(ConnectorSession session, Type type)
+    protected WriteMapping legacyToWriteMapping(Type type)
     {
-        if (type instanceof VarcharType) {
-            VarcharType varcharType = (VarcharType) type;
+        if (type instanceof VarcharType varcharType) {
             String dataType;
             if (varcharType.isUnbounded()) {
                 dataType = "varchar";
@@ -325,11 +266,10 @@ public class DB2Client
             }
             return WriteMapping.sliceMapping(dataType, varcharWriteFunction());
         }
-        if (type instanceof CharType) {
-            return WriteMapping.sliceMapping("char(" + ((CharType) type).getLength() + ")", charWriteFunction());
+        if (type instanceof CharType charType) {
+            return WriteMapping.sliceMapping("char(" + charType.getLength() + ")", charWriteFunction());
         }
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
+        if (type instanceof DecimalType decimalType) {
             String dataType = format("decimal(%s, %s)", decimalType.getPrecision(), decimalType.getScale());
             if (decimalType.isShort()) {
                 return WriteMapping.longMapping(dataType, shortDecimalWriteFunction(decimalType));
@@ -362,33 +302,27 @@ public class DB2Client
             return WriteMapping.sliceMapping("varbinary", varbinaryWriteFunction());
         }
         if (type == DATE) {
-            WriteMapping.longMapping("date", dateWriteFunctionUsingSqlDate());
+            return WriteMapping.longMapping("date", dateWriteFunctionUsingSqlDate());
         }
         throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type.getDisplayName());
     }
 
     @Override
-    protected void renameTable(ConnectorSession session, String catalogName, String schemaName, String tableName, SchemaTableName newTable)
+    protected void renameTable(ConnectorSession session, Connection connection, String catalogName, String remoteSchemaName, String remoteTableName, String newRemoteSchemaName, String newRemoteTableName)
+            throws SQLException
     {
-        try (Connection connection = connectionFactory.openConnection(session)) {
-            String newTableName = newTable.getTableName();
-            if (connection.getMetaData().storesUpperCaseIdentifiers()) {
-                newTableName = newTableName.toUpperCase(ENGLISH);
-            }
-            // Specifies the new name for the table without a schema name
-            String sql = format(
-                    "RENAME TABLE %s TO %s",
-                    quoted(catalogName, schemaName, tableName),
-                    quoted(newTableName));
-            execute(connection, sql);
+        if (!remoteSchemaName.equals(newRemoteSchemaName)) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming tables across schemas");
         }
-        catch (SQLException e) {
-            throw new TrinoException(JDBC_ERROR, e);
-        }
+        // Db2 requires specifying the new name for the table without a schema name
+        execute(session, connection, format(
+                "RENAME TABLE %s TO %s",
+                quoted(catalogName, remoteSchemaName, remoteTableName),
+                quoted(newRemoteTableName)));
     }
 
     @Override
-    protected void copyTableSchema(Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames)
+    protected void copyTableSchema(ConnectorSession session, Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames)
     {
         String sql = format(
                 "CREATE TABLE %s AS (SELECT %s FROM %s) WITH NO DATA",
@@ -397,6 +331,11 @@ public class DB2Client
                         .map(this::quoted)
                         .collect(joining(", ")),
                 quoted(catalogName, schemaName, tableName));
-        execute(connection, sql);
+        try {
+            execute(session, connection, sql);
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
+        }
     }
 }

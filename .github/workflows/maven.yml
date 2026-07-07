@@ -1,6 +1,6 @@
 name: Java CI
 
-on: 
+on:
   push:
     paths-ignore:
       - '**.md'
@@ -15,26 +15,49 @@ jobs:
       fail-fast: false
       matrix:
         java-version:
-        - 17
+        - 24
+        db2-version:
+        - 11.5.9.0
+        - 12.1.2.0
     env:
       MAVEN_SKIP_CHECKS_AND_DOCS: -Dair.check.skip-all=true -Dmaven.javadoc.skip=true
       MAVEN_FAST_INSTALL: -DskipTests -Dair.check.skip-all=true -Dmaven.javadoc.skip=true -B -q -T C1
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
 
-    - uses: actions/setup-java@v1
+    - uses: actions/setup-java@v4
       with:
+        distribution: temurin
         java-version: ${{ matrix.java-version }}
+
+    - name: Cache local Maven repository
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: maven-${{ runner.os }}-trino477-${{ hashFiles('pom.xml') }}
+        restore-keys: |
+          maven-${{ runner.os }}-trino477-
+
+    # Trino 477 was only partially published to Maven Central, so the required
+    # modules have to be built from source once (cached afterwards)
+    - name: Build Trino 477 modules
+      run: |
+        if [ ! -f ~/.m2/repository/io/trino/trino-base-jdbc/477/trino-base-jdbc-477.jar ]; then
+          git clone --depth 1 --branch 477 --filter=blob:none https://github.com/trinodb/trino.git /tmp/trino
+          cd /tmp/trino
+          ./mvnw -B install -pl plugin/trino-base-jdbc,plugin/trino-tpch,testing/trino-testing -am \
+            -DskipTests -Dair.check.skip-all=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true
+        fi
 
     - name: mvn install
       run: mvn install $MAVEN_FAST_INSTALL
 
     - name: mvn test
-      run: mvn test -Dmaven.javadoc.skip=true -B
+      run: mvn test -Dmaven.javadoc.skip=true -B -Ddb2.image=icr.io/db2_community/db2:${{ matrix.db2-version }}
 
     - name: Release
       uses: softprops/action-gh-release@v1
-      if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.java-version == '17' }}
+      if: ${{ startsWith(github.ref, 'refs/tags/') && matrix.java-version == '24' && matrix.db2-version == '11.5.9.0' }}
       with:
         files: |
           target/trino-db2-*.zip

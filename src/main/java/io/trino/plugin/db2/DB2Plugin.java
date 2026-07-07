@@ -13,13 +13,16 @@
  */
 package io.trino.plugin.db2;
 
-import io.trino.plugin.jdbc.JdbcPlugin;
+import com.google.common.collect.ImmutableList;
+import io.trino.spi.Plugin;
+import io.trino.spi.connector.ConnectorFactory;
 
 public class DB2Plugin
-        extends JdbcPlugin
+        implements Plugin
 {
-    public DB2Plugin()
+    @Override
+    public Iterable<ConnectorFactory> getConnectorFactories()
     {
-        super("db2", new DB2ClientModule());
+        return ImmutableList.of(new DB2ConnectorFactory());
     }
 }

@@ -14,7 +14,7 @@
 package io.trino.plugin.db2;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -38,10 +38,10 @@ public class TestDB2Config
         int testVarcharLength = 30000;
         String testApiKey = "xyz";
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("db2.varchar-max-length", String.valueOf(testVarcharLength))
                 .put("db2.iam-api-key", testApiKey)
-                .build();
+                .buildOrThrow();
 
         DB2Config expected = new DB2Config()
                 .setVarcharMaxLength(testVarcharLength)
